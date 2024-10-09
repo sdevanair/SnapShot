@@ -1,0 +1,324 @@
+BACKEND CODE:
+ import cv2
+import torch
+import easyocr
+import numpy as np
+from torchvision import models, transforms
+from PIL import Image, ImageDraw, ImageFont
+from gtts import gTTS
+from playsound import playsound
+import tempfile
+from fer import FER
+import pyperclip  # For copying text to clipboard
+
+# Load the pre-trained model (Faster R-CNN)
+model = models.detection.fasterrcnn_resnet50_fpn(weights="DEFAULT")
+model.eval()
+
+# Define COCO labels (manual creation)
+coco_labels = {
+    1: "person", 2: "bicycle", 3: "car", 4: "motorcycle", 5: "airplane", 6: "bus",
+    7: "train", 8: "truck", 9: "boat", 10: "traffic light", 11: "fire hydrant",
+    13: "stop sign", 14: "parking meter", 15: "bench", 16: "bird", 17: "cat",
+    18: "dog", 19: "horse", 20: "sheep", 21: "cow", 22: "elephant", 23: "bear",
+    24: "zebra", 25: "giraffe", 27: "backpack", 28: "umbrella", 31: "handbag",
+    32: "tie", 33: "suitcase", 34: "frisbee", 35: "skis", 36: "snowboard",
+    37: "sports ball", 38: "kite", 39: "baseball bat", 40: "baseball glove",
+    41: "skateboard", 42: "surfboard", 43: "tennis racket", 44: "bottle",
+    46: "wine glass", 47: "cup", 48: "fork", 49: "knife", 50: "spoon",
+    51: "bowl", 52: "banana", 53: "apple", 54: "sandwich", 55: "orange",
+    56: "broccoli", 57: "carrot", 58: "hot dog", 59: "pizza", 60: "donut",
+    61: "cake", 62: "chair", 63: "couch", 64: "potted plant", 65: "bed",
+    67: "dining table", 70: "toilet", 72: "TV", 73: "laptop", 74: "mouse",
+    75: "remote", 76: "keyboard", 77: "cell phone", 78: "microwave", 79: "oven",
+    80: "toaster", 81: "sink", 82: "refrigerator", 84: "book", 85: "clock",
+    86: "vase", 87: "scissors", 88: "teddy bear", 89: "hair drier", 90: "toothbrush"
+}
+
+# Define the image transformation
+transform = transforms.Compose([transforms.ToTensor()])
+
+# Load a font
+try:
+    font = ImageFont.truetype("/Library/Fonts/Arial.ttf", 20)  # Adjust font size here
+except IOError:
+    font = ImageFont.load_default()
+
+# Initialize easyOCR reader
+reader = easyocr.Reader(['en'])
+
+# Ask user if they want text-to-speech enabled
+tts_enabled = input("Do you want to enable text-to-speech? (yes/no): ").strip().lower() == 'yes'
+
+# Initialize text-to-speech if enabled
+if tts_enabled:
+    def text_to_speech(text):
+        tts = gTTS(text=text, lang='en')
+        with tempfile.NamedTemporaryFile(delete=True) as temp_file:
+            tts.save(temp_file.name)
+            playsound(temp_file.name)
+
+    def speak(text):
+        text_to_speech(text)
+else:
+    def speak(text):
+        pass  # No operation for speech
+
+def recognize_image(image_path):
+    original_image = Image.open(image_path).convert("RGB")
+    img_tensor = transform(original_image).unsqueeze(0)
+
+    with torch.no_grad():
+        outputs = model(img_tensor)
+
+    # Create a copy of the original image for object detection
+    detection_image = original_image.copy()
+    draw = ImageDraw.Draw(detection_image)
+
+    # Object detection
+    for box, label, score in zip(outputs[0]['boxes'], outputs[0]['labels'], outputs[0]['scores']):
+        if score > 0.5:
+            label_str = coco_labels.get(label.item(), "Unknown")
+            draw.rectangle(box.tolist(), outline="red", width=3)
+            text_position = (box[0], box[1] - 10)
+            draw.text(text_position, label_str, font=font, fill="red")
+            speak(label_str)
+
+    # Text recognition using easyOCR
+    img_np = np.array(original_image)
+    results = reader.readtext(img_np)
+    recognized_text = " ".join([text for (_, text, _) in results])
+
+    if recognized_text.strip():
+        print("Recognized Text: ", recognized_text)
+        speak("Text recognized in the image.")
+        speak(recognized_text)
+        # Copy the recognized text to clipboard
+        pyperclip.copy(recognized_text)
+        print("Recognized text copied to clipboard.")
+
+    # Save and show the image with detected objects
+    detection_image.save("output_image.png")
+    detection_image.show()
+
+def real_time_detection():
+    cap = cv2.VideoCapture(0)
+    detector = FER()
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        pil_image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        img_tensor = transform(pil_image).unsqueeze(0)
+
+        with torch.no_grad():
+            outputs = model(img_tensor)
+
+        # Create a copy of the image for object detection
+        detection_image = pil_image.copy()
+        draw = ImageDraw.Draw(detection_image)
+
+        # Object detection
+        for box, label, score in zip(outputs[0]['boxes'], outputs[0]['labels'], outputs[0]['scores']):
+            if score > 0.5:
+                label_str = coco_labels.get(label.item(), "Unknown")
+                draw.rectangle(box.tolist(), outline="red", width=3)
+                text_position = (box[0], box[1] - 10)
+                draw.text(text_position, label_str, font=font, fill="red")
+                speak(label_str)
+
+        # Text recognition using easyOCR
+        img_np = np.array(pil_image)
+        results = reader.readtext(img_np)
+        recognized_text = " ".join([text for (_, text, _) in results])
+
+        if recognized_text.strip():
+            print("Recognized Text: ", recognized_text)
+            speak("Text recognized in the video frame.")
+            speak(recognized_text)
+            # Copy the recognized text to clipboard
+            pyperclip.copy(recognized_text)
+            print("Recognized text copied to clipboard.")
+
+        # Emotion detection
+        emotions = detector.detect_emotions(np.array(frame))
+        if emotions:
+            top_emotion = max(emotions[0]['emotions'], key=emotions[0]['emotions'].get)
+            emotion_str = f"Detected emotion: {top_emotion} with confidence {emotions[0]['emotions'][top_emotion]:.2f}"
+            print(emotion_str)
+            speak(emotion_str)
+
+        result_frame = cv2.cvtColor(np.array(detection_image), cv2.COLOR_RGB2BGR)
+        cv2.imshow('Object Detection', result_frame)
+        cv2.imshow('Emotion Detection', result_frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+def main():
+    choice = input("Enter '1' for image recognition or '2' for real-time detection: ")
+    if choice == '1':
+        image_path = input("Enter the path to the image: ")
+        recognize_image(image_path)
+    elif choice == '2':
+        real_time_detection()
+    else:
+        print("Invalid choice. Please enter '1' or '2'.")
+
+if _name_ == '_main_':
+    main()
+
+FRONT END CODE
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Object and Text Recognition</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f4;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+        }
+
+        .container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+            text-align: center;
+            width: 80%;
+            max-width: 500px;
+        }
+
+        h1 {
+            color: #333;
+        }
+
+        label {
+            font-size: 16px;
+            margin-bottom: 10px;
+            display: block;
+        }
+
+        input[type="file"] {
+            margin-bottom: 20px;
+        }
+
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background-color: #0056b3;
+        }
+
+        #outputImage {
+            margin-top: 20px;
+            max-width: 100%;
+            display: none;
+        }
+
+        #recognizedText {
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Object and Text Recognition</h1>
+    
+    <label for="imageUpload">Upload an Image:</label>
+    <input type="file" id="imageUpload" accept="image/*" />
+
+    <button id="recognizeImageButton">Recognize Image</button>
+    <button id="startDetectionButton">Start Real-Time Detection</button>
+
+    <img id="outputImage" alt="Recognized Image" />
+    <div id="recognizedText"></div>
+</div>
+
+<script>
+    document.getElementById('recognizeImageButton').addEventListener('click', function() {
+        const fileInput = document.getElementById('imageUpload');
+        const file = fileInput.files[0];
+
+        if (!file) {
+            alert('Please upload an image!');
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append('image', file);
+
+        fetch('/recognize-image', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+            const outputImage = document.getElementById('outputImage');
+            outputImage.src = 'data:image/png;base64,' + data.image;
+            outputImage.style.display = 'block';
+
+            const recognizedText = document.getElementById('recognizedText');
+            recognizedText.innerHTML = '<strong>Recognized Text:</strong> ' + data.text;
+        })
+        .catch(error => {
+            console.error('Error:', error);
+        });
+    });
+
+    document.getElementById('startDetectionButton').addEventListener('click', function() {
+        fetch('/start-real-time-detection', {
+            method: 'GET'
+        })
+        .then(response => {
+            if (response.ok) {
+                alert('Real-time detection started!');
+            } else {
+                alert('Failed to start real-time detection.');
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+        });
+    });
+</script>
+
+</body>
+</html>
+
+IDEA TITLE
+PROPOSED SOLUTION:
+Age Guardian is a cutting-edge mobile app designed to safeguard the elderly through advanced technology. It serves as a digital guardian, offering real-time health monitoring, precise location tracking, and seamless caregiver communication. The app uses cloud-based services for constant connectivity and a robust fall detection system to alert guardians during emergencies. It includes two key apps: the User App for the elderly and the Guardian App for caregivers.  Addressing the Problem: Age Guardian tackles critical issues in elderly care, such as health monitoring, fall risk, and timely emergency assistance. The integration of weather data further prevents weather-related health risks, ensuring comprehensive care regardless of distance.  Innovation and Uniqueness: Age Guardian stands out by integrating multiple care aspects into one user-friendly app. The innovative use of fuzzy logic to correlate weather with health data adds a unique, proactive layer of care, making it a standout solution in elderly care. 
+TECHNICAL APPROACH 
+
+TECHNOLOGIES USED Programming Languages: Java/Kotlin (Android development), Python (algorithms), JavaScript (front-end). Frameworks/Libraries: Android SDK, OpenCV (video processing), TensorFlow Lite (ML models), AWS SDK. Cloud Services: AWS SQS (message queuing), Amazon DynamoDB (data storage), AWS Lambda (serverless computing). Hardware: Smartphone sensors (accelerometer, gyroscope), Camera (heart rate monitoring). APIs: Weather API (real-time weather data).   METHODOLOGY Design: Create system architecture and flowcharts to outline app functionality. Prototype Development: Build a working prototype focusing on core features (sensor integration, fall detection). Implementation Phases: Integrate sensors and camera for health monitoring. Implement AWS services for data communication and storage. Develop UI/UX for elderly users and caregivers. Testing: Conduct unit, integration, and user testing for functionality and usability. Deployment: Beta testing followed by full deployment on platforms like the Google Play Store.  
+
+FEASIBILITY AND VIABILITY
+
+Feasibility Analysis The Age Guardian app is feasible as it integrates health monitoring, fall detection, weather risk assessment, and location tracking into one comprehensive solution. By leveraging technologies like AWS SQS and Amazon DynamoDB, it ensures efficient data management and real-time communication. Its user-centric design also enhances accessibility for elderly individuals and effective communication with caregivers. Potential Challenges and Risks Key challenges include ensuring data privacy and security, maintaining accurate health monitoring and fall detection, and addressing difficulties elderly users might face with technology adoption. Additional risks involve the accuracy of weather data and potential issues with battery life and device compatibility. Strategies for Overcoming Challenges To overcome these challenges, the app should employ robust encryption and regular security audits for data protection. Extensive algorithm testing and user training will enhance accuracy and adoption. Reliable weather data sources and optimization for battery life and device compatibility will also be crucial for success.
+
+IMPACT AND BENEFITS
+Potential Impact on the Target Audience Age Guardian offers a transformative solution for elderly care by integrating advanced health monitoring, fall detection, and precise location tracking. It ensures enhanced safety and timely intervention, significantly improving the quality of life for elderly individuals and providing caregivers with reliable tools to manage their loved one's well-being effectively. Benefits of the Solution Social: Promotes independence for elderly individuals while strengthening the connection between them and their caregivers. It enhances communication and support, fostering a sense of security. Economic: Reduces the costs associated with emergency care and long-term health complications by preventing accidents and health issues through proactive monitoring. Environmental: Minimizes the need for unnecessary travel and resource use by providing timely weather risk assessments, allowing users to make informed decisions about outdoor activities. 
+
+RESEARCH AND REFERENCES 
+Android programming techniques for improving performance https://ieeexplore.ieee.org/abstract/document/6163105  AsyncTask Android Development AsyncTask  |  Android Developers  
